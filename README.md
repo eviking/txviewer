@@ -4,18 +4,20 @@ A real-time terminal viewer for [Claude Code](https://claude.ai/code) sessions.
 Watch every step Claude takes as it happens — tool calls, token costs, file edits,
 bash commands — all in a clean split-pane TUI.
 
+Only tested with version 2.1.162 of Claude Code on a Mac
+
 ```
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║  txviewer  │  f53d98e2.jsonl  │  41 turns  │  LIVE  │  14:23:01            ║
-╠════════════════╦═══════════════════════════════════════════════════════════════╣
+║  txviewer  │  f53d98e2.jsonl  │  41 turns  │  LIVE  │  14:23:01              ║
+╠════════════════╦═════════════════════════════════════════════════════════════╣
 ║ T01 add a feat ║ Turn 3  refactor the telemetry hook                         ║
-║ T02 fix the bu ║ In(cached): 348k  In(new): 12k  Out: 8k  Cache: 97%       ║
-║ T03 refactor t ║ ─────────────────────────────────────────────────────────  ║
-║ the telemetry  ║  1. Read    .claude/hooks/require_telemetry.py             ║
-║ hook           ║  2. Edit    .claude/hooks/require_telemetry.py             ║
-║                ║  3. Bash    docker compose up --build api                  ║
-║                ║  4. kg:     answer_question  [telemetry hook classes]      ║
-╚════════════════╩═══════════════════════════════════════════════════════════════╝
+║ T02 fix the bu ║ In(cached): 348k  In(new): 12k  Out: 8k  Cache: 97%         ║
+║ T03 refactor t ║ ─────────────────────────────────────────────────────────   ║
+║ the telemetry  ║  1. Read    .claude/hooks/require_telemetry.py              ║
+║ hook           ║  2. Edit    .claude/hooks/require_telemetry.py              ║
+║                ║  3. Bash    docker compose up --build api                   ║
+║                ║  4. kg:     answer_question  [telemetry hook classes]       ║
+╚════════════════╩═════════════════════════════════════════════════════════════╝
 ```
 
 ## Features
