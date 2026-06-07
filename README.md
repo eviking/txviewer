@@ -22,8 +22,10 @@ Only tested with version 2.1.162 of Claude Code on a Mac
 
 ## Features
 
-- **Live updates** — watches the transcript file and refreshes as Claude works
+- **Live updates** — watches the transcript file and refreshes as Claude works; right pane auto-scrolls to the latest step
 - **Step-by-step detail** — every tool call with its target, result preview, and token cost
+- **Step navigation** — Tab to the right pane and use ↑/↓ to move a cyan cursor between steps; the selected step expands its full input and result text
+- **Dual-pane focus** — a cyan `◀`/`▶` arrow on the divider shows which pane is active; Tab switches between them
 - **Smart Bash summaries** — `python3 -c` scripts are summarised from their comments
   and code: `[Why are there no cross-module dependencies?]`, `[SQLite: select query]`
 - **Docker depth** — distinguishes infra (`docker compose up`) from discovery
@@ -47,6 +49,11 @@ chmod +x txviewer.py
 ./txviewer.py
 ```
 
+> **Run txviewer from the same directory where Claude Code is running.**
+> With no arguments it attaches to the most recently modified transcript across all projects.
+> Running it from the active project directory ensures that session stays the most recent one.
+> If you work across multiple projects, use `--list` to see all sessions with their project paths and pick one by ID.
+
 ## Usage
 
 ```bash
@@ -61,8 +68,9 @@ python3 txviewer.py --help           # full documentation
 
 | Key | Action |
 |-----|--------|
-| `↑` / `↓` | Navigate turns |
-| `j` / `k` | Scroll detail pane |
+| `Tab` | Switch focus between left (turns) and right (steps) pane |
+| `↑` / `↓` | Navigate turns (left focus) or move between steps (right focus) |
+| `j` / `k` | Scroll detail pane down / up |
 | `l` | Toggle LIVE mode |
 | `Enter` | Pin / unpin selected turn |
 | `s` | Session summary |

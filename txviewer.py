@@ -10,7 +10,9 @@ Usage:
     python3 txviewer.py <session.jsonl>  # watch specific file
 
 Keys:
-    ↑ / ↓      navigate turns
+    Tab        switch focus between left (turns) and right (steps) pane
+    ↑ / ↓      navigate turns (left focus) or step through steps (right focus)
+    j / k      scroll detail pane down / up
     Enter      pin/unpin selected turn detail
     l          toggle live mode (auto-follow latest)
     s          session summary (token spend by activity)
@@ -250,14 +252,42 @@ def _fmt_tok(n: int) -> str:
     if n >= 1000: return f"{n/1000:.1f}k"
     return str(n)
 
+import unicodedata as _unicodedata
+
+def _char_width(c: str) -> int:
+    eaw = _unicodedata.east_asian_width(c)
+    return 2 if eaw in ('W', 'F') else 1
+
+def _clip_to_width(text: str, max_w: int) -> str:
+    """Clip text to at most max_w terminal columns, respecting double-width chars."""
+    cols = 0
+    for i, c in enumerate(text):
+        cw = _char_width(c)
+        if cols + cw > max_w:
+            return text[:i]
+        cols += cw
+    return text
+
+def _str_width(text: str) -> int:
+    """Return the terminal column width of text."""
+    return sum(_char_width(c) for c in text)
+
+def _sanitize(text: str) -> str:
+    """Replace control characters (newlines, tabs, ANSI escapes, etc.) with safe equivalents."""
+    import re as _re2
+    # strip ANSI escape sequences
+    text = _re2.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', text)
+    # collapse all whitespace variants to a single space
+    return text.replace('\r', ' ').replace('\n', ' ').replace('\t', ' ')
+
 def _addstr_clipped(win, y: int, x: int, text: str, attr: int, max_w: int):
-    """Write text clipped to max_w chars, never raising on overflow."""
+    """Write text clipped to max_w terminal columns, never raising on overflow."""
     h, w = win.getmaxyx()
     if y >= h - 1 or x >= w: return
     avail = min(max_w, w - x - 1)
     if avail <= 0: return
     try:
-        win.addstr(y, x, text[:avail], attr)
+        win.addstr(y, x, _clip_to_width(text, avail), attr)
     except curses.error:
         pass
 
@@ -842,7 +872,8 @@ def draw_help_popup(stdscr, h: int, w: int):
         "  CodeKG Sidecar — Help  ",
         "",
         "  Navigation",
-        "  ↑ / ↓       Navigate turns",
+        "  Tab          Switch focus left ◀ / right ▶ panel",
+        "  ↑ / ↓       Navigate turns (left) or scroll (right)",
         "  j / PgDn    Scroll detail down",
         "  k / PgUp    Scroll detail up",
         "",
@@ -893,6 +924,8 @@ def run_ui(stdscr, transcript_path: Path):
     pinned = False     # user manually selected a turn
     show_summary = False
     show_help = False
+    focus = "left"     # which pane owns ↑/↓: "left" or "right"
+    selected_step = 0  # step index highlighted in right pane (when focus=="right" and paused)
 
     file_lines: list[str] = []
     last_mtime = 0.0
@@ -919,7 +952,7 @@ def run_ui(stdscr, transcript_path: Path):
 
         if turns and live_mode and not pinned:
             selected = len(turns) - 1
-            detail_scroll = 0
+            detail_scroll = 999999  # will be clamped to max_scroll after detail_lines is built
 
         h, w = stdscr.getmaxyx()
         left_w  = max(30, w // 3)
@@ -933,7 +966,7 @@ def run_ui(stdscr, transcript_path: Path):
         _addstr_clipped(stdscr, 0, 0, header.ljust(w), cp(C_HEADER) | curses.A_BOLD, w)
 
         # ── Footer bar ────────────────────────────────────────────────────────
-        footer = " ↑↓ navigate  j/k scroll  Enter pin  l live  s summary  h help  q quit "
+        footer = " Tab focus  ↑↓ navigate/scroll  j/k scroll  Enter pin  l live  s summary  h help  q quit "
         _addstr_clipped(stdscr, h-1, 0, footer.ljust(w), cp(C_HEADER), w)
 
         # ── Left pane: turn list (multi-line prompts) ─────────────────────────
@@ -978,35 +1011,54 @@ def run_ui(stdscr, transcript_path: Path):
                 list_scroll = sel_last_row - list_h + 1
             list_scroll = max(0, list_scroll)
 
+        # Clear all left-pane rows first so no stale content bleeds through
+        for r in range(list_h):
+            row = r + 1
+            if row >= h - 1:
+                break
+            _addstr_clipped(stdscr, row, 0, " " * left_w, C_NORMAL, left_w)
+
         for r, (ti, line_text, is_first) in enumerate(all_list_rows[list_scroll:]):
             row = r + 1
             if row >= h - 1:
                 break
             is_sel = (ti == selected)
-            attr_base = cp(C_SELECTED) if is_sel else C_NORMAL
-
-            if is_sel:
-                try:
-                    stdscr.attron(cp(C_SELECTED))
-                    stdscr.move(row, 0)
-                    stdscr.clrtoeol()
-                    stdscr.attroff(cp(C_SELECTED))
-                except curses.error:
-                    pass
-
-            if is_first:
-                label = f" T{ti+1:02d} "
-                label_attr = cp(C_SELECTED) if is_sel else (cp(C_GREEN) | curses.A_BOLD)
+            left_focused = (focus == "left")
+            if is_sel and left_focused:
+                attr_base = cp(C_SELECTED)
+            elif is_sel:
+                attr_base = cp(C_DIM) | curses.A_REVERSE
             else:
-                label = "      "
+                attr_base = C_NORMAL
+
+            # Paint the full row background for selected turns
+            if is_sel:
+                _addstr_clipped(stdscr, row, 0, " " * left_w, attr_base, left_w)
+
+            label = f" T{ti+1:02d} " if is_first else "      "
+            if is_first:
+                if is_sel and left_focused:
+                    label_attr = cp(C_SELECTED)
+                elif is_sel:
+                    label_attr = cp(C_DIM) | curses.A_REVERSE
+                else:
+                    label_attr = cp(C_GREEN) | curses.A_BOLD
+            else:
                 label_attr = attr_base
 
-            _addstr_clipped(stdscr, row, 0, label, label_attr, 6)
-            _addstr_clipped(stdscr, row, 5, line_text.ljust(text_w), attr_base, text_w + 1)
+            # label occupies cols 0-4 (5 chars), text starts at col 5
+            _addstr_clipped(stdscr, row, 0, label, label_attr, 5)
+            _addstr_clipped(stdscr, row, 5, line_text[:text_w].ljust(text_w), attr_base, text_w)
 
-        # ── Divider ────────────────────────────────────────────────────────────
+        # ── Divider — cyan ▶ on left edge when right pane focused, ◀ on right edge when left focused ──
         for row in range(1, h - 1):
             _addstr_clipped(stdscr, row, left_w, "│", cp(C_DIM), 1)
+        # Draw a cyan focus arrow at mid-height on the divider
+        mid = (h - 2) // 2
+        if focus == "right":
+            _addstr_clipped(stdscr, mid, left_w, "▶", cp(C_CYAN) | curses.A_BOLD, 1)
+        else:
+            _addstr_clipped(stdscr, mid, left_w, "◀", cp(C_CYAN) | curses.A_BOLD, 1)
 
         # ── Right pane: summary or step detail ────────────────────────────────
         rx = left_w + 1
@@ -1019,8 +1071,16 @@ def run_ui(stdscr, transcript_path: Path):
         elif turns and 0 <= selected < len(turns):
             turn = turns[selected]
 
+            step_navigating = (focus == "right" and not live_mode and not show_summary)
+
+            # Clamp selected_step to valid range
+            if turn.steps:
+                selected_step = max(0, min(selected_step, len(turn.steps) - 1))
+            else:
+                selected_step = 0
+
             # Turn header
-            prompt_display = turn.prompt.replace("\n", " ")
+            prompt_display = _sanitize(turn.prompt)
             detail_lines.append((f" Turn {turn.index+1}  {prompt_display}", cp(C_BOLD) | curses.A_BOLD))
             detail_lines.append(("", C_NORMAL))
 
@@ -1036,43 +1096,85 @@ def run_ui(stdscr, transcript_path: Path):
             detail_lines.append((stats, cp(C_GREEN)))
             detail_lines.append((" " + "─" * (right_w - 3), cp(C_DIM)))
 
-            # Steps
-            for step in turn.steps:
+            # Steps — track which detail_lines row each step starts on for auto-scroll
+            step_first_line: list[int] = []  # detail_lines index of each step's first line
+
+            for si, step in enumerate(turn.steps):
+                is_sel_step = step_navigating and (si == selected_step)
                 tool_disp  = _tool_short(step.tool_name)
                 tok_disp   = f"+{_fmt_tok(step.step_tokens)}" if step.step_tokens else ""
                 badges     = ""
                 if step.is_ops:    badges += " [ops]"
                 if step.is_codekg: badges += " [kg]"
 
+                step_first_line.append(len(detail_lines))
+
+                if is_sel_step:
+                    line_attr = cp(C_SELECTED) | curses.A_BOLD
+                    sub_attr  = cp(C_SELECTED)
+                else:
+                    line_attr = _tool_color(step)
+                    sub_attr  = cp(C_DIM)
+
                 # Step number + tool name + token
                 line1 = f" {step.index:2d}. {tool_disp:<20}{badges:<8}{tok_disp:>6} "
-                detail_lines.append((line1, _tool_color(step)))
+                detail_lines.append((line1, line_attr))
 
-                # Input summary
+                # Input summary — full text (wrap long lines) when selected, one line otherwise
                 if step.input_summary:
-                    summary = step.input_summary.replace("\n", " ")
-                    detail_lines.append((f"     ↳ {summary}", cp(C_DIM)))
+                    raw = _sanitize(step.input_summary)
+                    wrap_w = right_w - 10
+                    if is_sel_step:
+                        first = True
+                        while raw:
+                            prefix = "     ↳ " if first else "       "
+                            clipped = _clip_to_width(raw, wrap_w)
+                            detail_lines.append((f"{prefix}{clipped}", sub_attr))
+                            raw = raw[len(clipped):]
+                            first = False
+                    else:
+                        detail_lines.append((f"     ↳ {_clip_to_width(raw, wrap_w)}", sub_attr))
 
-                # Result preview (first line only, expandable in future)
+                # Result preview — full text when selected, first line otherwise
                 if step.result_preview:
-                    preview = step.result_preview.replace("\n", " ").strip()
-                    detail_lines.append((f"     → {preview[:right_w - 8]}", cp(C_DIM)))
+                    raw = _sanitize(step.result_preview)
+                    wrap_w = right_w - 10
+                    if is_sel_step:
+                        first = True
+                        while raw:
+                            prefix = "     → " if first else "       "
+                            clipped = _clip_to_width(raw, wrap_w)
+                            detail_lines.append((f"{prefix}{clipped}", sub_attr))
+                            raw = raw[len(clipped):]
+                            first = False
+                    else:
+                        detail_lines.append((f"     → {_clip_to_width(raw, wrap_w)}", sub_attr))
 
                 detail_lines.append(("", C_NORMAL))
+
+            # Auto-scroll so selected step is visible in right pane
+            if step_navigating and turn.steps:
+                step_row = step_first_line[selected_step]
+                visible_h = h - 3
+                if step_row < detail_scroll:
+                    detail_scroll = step_row
+                elif step_row >= detail_scroll + visible_h:
+                    detail_scroll = step_row - visible_h + 1
 
             # Final response text
             if turn.response_text:
                 detail_lines.append((" " + "─" * (right_w - 3), cp(C_DIM)))
                 detail_lines.append((" Response:", cp(C_CYAN) | curses.A_BOLD))
-                # Word-wrap response to right pane width
-                words = turn.response_text.split()
+                wrap_w = right_w - 3
+                words = _sanitize(turn.response_text).split()
                 line_buf = " "
                 for word in words:
-                    if len(line_buf) + len(word) + 1 > right_w - 2:
+                    candidate = line_buf + (" " if line_buf.strip() else "") + word
+                    if _str_width(candidate) > wrap_w:
                         detail_lines.append((line_buf, C_NORMAL))
                         line_buf = "  " + word
                     else:
-                        line_buf += (" " if line_buf.strip() else "") + word
+                        line_buf = candidate
                 if line_buf.strip():
                     detail_lines.append((line_buf, C_NORMAL))
             elif not turn.is_complete and turn.steps:
@@ -1117,17 +1219,37 @@ def run_ui(stdscr, transcript_path: Path):
         elif key in (ord('s'), ord('S')):
             show_summary = not show_summary
             detail_scroll = 0
+        elif key == ord('\t'):  # Tab — switch focus between panels
+            focus = "right" if focus == "left" else "left"
+            selected_step = 0
+            if focus == "right" and live_mode:
+                # Pause so arrow keys navigate steps immediately
+                live_mode = False
+                pinned = True
         elif key == curses.KEY_UP:
-            selected = max(0, selected - 1)
-            pinned = True
-            live_mode = False
-            detail_scroll = 0
-            # list_scroll adjusted automatically by visibility logic above
+            if focus == "left":
+                selected = max(0, selected - 1)
+                pinned = True
+                live_mode = False
+                detail_scroll = 0
+                selected_step = 0
+            elif not live_mode and not show_summary:
+                selected_step = max(0, selected_step - 1)
+            else:
+                detail_scroll = max(0, detail_scroll - 1)
         elif key == curses.KEY_DOWN:
-            selected = min(len(turns) - 1, selected + 1) if turns else 0
-            pinned = True
-            live_mode = False
-            detail_scroll = 0
+            if focus == "left":
+                selected = min(len(turns) - 1, selected + 1) if turns else 0
+                pinned = True
+                live_mode = False
+                detail_scroll = 0
+                selected_step = 0
+            elif not live_mode and not show_summary:
+                cur_turn = turns[selected] if turns and 0 <= selected < len(turns) else None
+                max_step = len(cur_turn.steps) - 1 if cur_turn else 0
+                selected_step = min(max_step, selected_step + 1)
+            else:
+                detail_scroll += 1
         elif key in (curses.KEY_PPAGE, ord('k')):
             detail_scroll = max(0, detail_scroll - 10)
         elif key in (curses.KEY_NPAGE, ord('j')):
@@ -1136,11 +1258,12 @@ def run_ui(stdscr, transcript_path: Path):
             pinned = not pinned
             if not pinned:
                 live_mode = True
+                detail_scroll = 999999  # clamped to max_scroll after render
         elif key in (ord('l'), ord('L')):
             live_mode = not live_mode
             if live_mode:
                 pinned = False
-                detail_scroll = 0
+                detail_scroll = 999999  # clamped to max_scroll after render
 
         time.sleep(0.2)
 
@@ -1216,11 +1339,24 @@ SESSION SUMMARY  (press s)
   Below the chart: most-touched files and most token-intensive turns.
 
 LIVE vs PAUSED
-  LIVE    The right pane auto-scrolls to the latest turn as it arrives.
+  LIVE    The right pane scrolls to the latest step as it arrives.
   PAUSED  You navigated away; sidecar still watches but holds your position.
+          Tab into the right pane to step through individual tool calls.
+
+PANEL FOCUS
+  The divider between the two panes shows a cyan arrow indicating which panel
+  is active:  ◀  means the left (turn list) is focused,  ▶  means the right
+  (step detail) is focused.
+
+  Press Tab to switch focus. Arrow keys act on whichever panel is focused:
+    Left focused   ↑ / ↓  navigate between turns
+    Right focused  ↑ / ↓  move the cyan cursor between steps in the turn.
+                           The selected step expands its full input and result.
+                           Tabbing to the right pane auto-pauses live mode.
 
 KEYBOARD SHORTCUTS
-  ↑ / ↓        Navigate turns (enters PAUSED mode)
+  Tab          Switch focus between left and right pane
+  ↑ / ↓        Navigate turns (left focus) or step through steps (right focus)
   j / PgDn     Scroll detail pane down
   k / PgUp     Scroll detail pane up
   l            Toggle LIVE mode
@@ -1231,6 +1367,7 @@ KEYBOARD SHORTCUTS
 
 TIPS
   • Run sidecar before you start a Claude Code session so it picks up turn 1.
+  • Press Tab then ↑/↓ to inspect any step in full — input and result expand.
   • Press s after a long session to see where the time actually went.
   • The "In(new)" number tells you how much new context was added each turn —
     a high number means Claude read a lot of new files or tool results.
@@ -1271,6 +1408,57 @@ def resolve_transcript(arg: str) -> Optional[Path]:
     return None
 
 
+def slug_to_human_path(slug: str) -> str:
+    """Reconstruct a human-readable path from a Claude Code project slug.
+
+    Claude Code slugifies project paths by replacing '/' with '-' and '.' with '-',
+    so '--' in the slug marks a hidden directory (path-sep + dot).  We probe the
+    filesystem to disambiguate hyphens-as-separator from hyphens-in-name.
+    """
+    HIDDEN = "\x00"
+    # '--' encodes '/<hidden-dir>' (the dot is also replaced with '-')
+    normalized = slug.replace("--", HIDDEN).lstrip("-").replace(HIDDEN, "/.")
+    segs = normalized.split("/")
+
+    # Flatten into parts with MUST-split markers between known '/' boundaries
+    MUST = object()
+    flat: list = []
+    for i, seg in enumerate(segs):
+        if i > 0:
+            flat.append(MUST)
+        flat.extend(seg.split("-"))
+
+    best: list[str] = [""]
+
+    def solve(idx: int, current: Path) -> None:
+        if idx == len(flat):
+            p = str(current)
+            if len(p) > len(best[0]):
+                best[0] = p
+            return
+        if flat[idx] is MUST:
+            solve(idx + 1, current)
+            return
+        seg = flat[idx]
+        j = idx
+        while True:
+            candidate = current / seg
+            if candidate.exists():
+                solve(j + 1, candidate)
+            j += 1
+            if j >= len(flat) or flat[j] is MUST:
+                break
+            seg = seg + "-" + flat[j]
+
+    solve(0, Path("/"))
+
+    result = best[0] if best[0] else "/" + normalized.replace("-", "/")
+    home = str(Path.home())
+    if result.startswith(home):
+        result = "~" + result[len(home):]
+    return result
+
+
 def print_session_list():
     sessions = list_sessions()
     if not sessions:
@@ -1280,8 +1468,7 @@ def print_session_list():
     print(f"{'#':>3}  {'Session ID':36}  {'Project':30}  {'Modified':16}  {'Size':>6}")
     print("─" * 100)
     for i, s in enumerate(sessions[:30], 1):
-        project = s.parent.name.replace("-Users-jensschutt-Documents-", "…/")
-        # shorten long project slugs
+        project = slug_to_human_path(s.parent.name)
         if len(project) > 30:
             project = "…" + project[-29:]
         mtime = time.strftime("%Y-%m-%d %H:%M", time.localtime(s.stat().st_mtime))
